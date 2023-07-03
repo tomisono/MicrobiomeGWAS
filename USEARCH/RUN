@@ -1,0 +1,13 @@
+#!/bin/bash
+
+echo 'Welcome!  Amsterdam Wolf....'
+echo '  '
+echo 'USEARCH PIPELINE -- FASTQ --> ASV TABLE'
+
+./info
+./merge  
+./filter
+./dereplicate
+./denoise
+./table
+

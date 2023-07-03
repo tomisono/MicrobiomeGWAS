@@ -1,0 +1,12 @@
+#!/bin/bash
+
+echo 'Welcome!  Amsterdam Wolf....'
+echo '  '
+echo ' -- dereplicate'
+
+cd /home/tomi/Desktop/Arena/USEARCH/Out
+# dereplicate / deduplication
+usearch32 -fastx_uniques ./filtered.fasta -fastaout uniques.fa -sizeout -relabel Uniq 2>&1
+
+
+

@@ -1,0 +1,12 @@
+#!/bin/bash
+
+echo 'Welcome!  Amsterdam Wolf....'
+echo '  '
+echo ' -- denoise'
+
+cd /home/tomi/Desktop/Arena/USEARCH/Out
+usearch32 -unoise3 ./uniques.fa -zotus  zotus.fa 2>&1
+
+
+
+
