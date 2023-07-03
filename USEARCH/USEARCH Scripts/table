@@ -1,0 +1,12 @@
+#!/bin/bash
+
+echo 'Welcome!  Amsterdam Wolf....'
+echo '  '
+echo ' -- table'
+
+cd /home/tomi/Desktop/Arena/USEARCH/Out
+usearch32 -otutab ./merged.fastq -zotus ./zotus.fa -otutabout ASV_table_FINAL.txt 2>&1 
+
+
+
+
