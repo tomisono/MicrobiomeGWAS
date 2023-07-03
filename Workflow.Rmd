@@ -1,0 +1,2260 @@
+---
+title: "Bioinformatics Workflow for Microbiome & Genotype Analysis from Raw Data to Scientific Findings"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+date: "2023-01-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load required packages 
+
+```{}
+library(dplyr)
+library(forcats)
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(phyloseq)
+library(reshape2)
+library(gridExtra)
+library(ggrepel)
+library(ggpubr)
+library(plotly)
+library(qqman)
+library(BiocManager)
+library(biomaRt)
+library(TwoSampleMR)
+library(R.utils)
+library(remotes)
+library(dada2)
+library(Biostrings)
+library(openxlsx)
+library(MRInstruments)
+library(data.table)
+library(openxlsx)
+```
+ 
+Load Phyloseq 
+```{}
+# GENUS LEVEL
+
+setwd("/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth")
+df <- readRDS("ps.HELIUS.pictures.H1H2.RDS")
+```
+
+
+
+Reassign Taxonomy
+```{}
+taxonomy <- as.data.frame(tax_table(df)) 
+#
+seqs <- c(row.names(taxonomy))
+set.seed(100) # Initialize random number generator for reproducibility
+taxa <- assignTaxonomy(seqs, "/home/tomi/Desktop/Arena/ASV/silva_nr_v132_train_set.fa", multithread=20)   # GENUS
+#taxa.plus <- addSpecies(taxa, "/home/tomi/Desktop/Arena/ASV/silva_species_assignment_v132.fa", verbose=TRUE)  # SPECIES
+#taxa.plus <- as.data.frame(taxa.plus)
+#
+asv <- paste0("ASV_", 1:dim(otu_table(df))[2])
+taxa <- as.data.frame(taxa)
+taxa$ASV <- asv
+
+taxx <- as(taxa,'matrix')
+taxx <- tax_table(taxx)
+tax_table(df) <- taxx
+
+# change tag
+taxa_names(df) <- asv
+#
+rm(taxa,taxonomy,asv,seqs,taxx)
+```
+
+
+
+Agglomerate
+```{}
+df_Genus <- tax_glom(df, "Genus")
+taxa_names(df_Genus) <- tax_table(df_Genus)[, 6] # Changing names for clarity
+#taxa_names(df_Genus)
+
+# Sepearte Timepoint1  and  Timepoint2
+
+DF.GENUS.T1 <- subset_samples(df_Genus, Time_Point == "H1")
+DF.GENUS.T2 <- subset_samples(df_Genus, Time_Point == "H2")
+
+# Create a function
+extract.transpose <- function(DF.GENUS) {
+  # Extract abundance matrix from the phyloseq object
+  OTU1 = as(otu_table(DF.GENUS), "matrix")
+  # transpose if necessary
+  if(taxa_are_rows(DF.GENUS)){OTU1 <- t(OTU1)}
+  # Coerce to data.frame
+  OTUdf = as.data.frame(OTU1)
+  return(OTUdf)
+}
+
+DFGT1 <- extract.transpose(DF.GENUS.T1)
+DFGT2 <- extract.transpose(DF.GENUS.T2)
+
+#Get row names of both data frames
+Namest1 <- rownames(DFGT1)
+Namest2 <- rownames(DFGT2)
+
+#convert names to only ID
+ID1 <-  sub('H1.', '', Namest1)
+ID2 <-  sub('H2.', '', Namest2)
+
+# Get non paired subjects
+npaired1 <- c(setdiff(ID1, ID2))  # whats in 1 not in 2
+npaired2 <- c(setdiff(ID2, ID1))  # whats in 2 not in 1
+
+npaired1 <- unlist(lapply(npaired1, function(x) c(paste("H1", x , sep = "."))))
+npaired2 <- unlist(lapply(npaired2, function(x) c(paste("H2", x , sep = "."))))
+
+# Drop unpaired rows
+DFGT1 <- subset(DFGT1,!(row.names(DFGT1) %in% npaired1))
+DFGT2 <- subset(DFGT2,!(row.names(DFGT2) %in% npaired2))
+
+DFGT1$X <- row.names(DFGT1)
+DFGT2$X <- row.names(DFGT2)
+
+# Reorder Dataframe*
+DFGT1 <- DFGT1[order(DFGT1$X),]
+DFGT2 <- DFGT2[order(DFGT2$X),]
+
+setwd("/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF")
+write.csv(DFGT1,"DF.GENUS.T1.MO.csv", row.names = FALSE)
+write.csv(DFGT2,"DF.GENUS.T2.MO.csv", row.names = FALSE)
+#######
+#######
+```
+
+
+```{}
+# CLEAR WORKSPACE
+rm(list=ls())
+```
+
+
+Load Dataframe
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+#######
+# READ DATA
+#######
+DFGT1 <- read.csv("DF.GENUS.T1.MO.csv")
+DFGT2 <- read.csv("DF.GENUS.T2.MO.csv")
+
+# Change column to row names
+row.names(DFGT1) <- DFGT1$X
+row.names(DFGT2) <- DFGT2$X
+
+# Remove specific column
+DFGT1 <- DFGT1[ , !names(DFGT1) %in% c("X")]
+DFGT2 <- DFGT2[ , !names(DFGT2) %in% c("X")]
+#####################
+
+#######
+# No Relative Abundance 
+#######
+```
+
+# Prevalence
+
+1/1 = 1 , 1/0  = Inf , 0/1 = 0 , 0/0 = NaN
+
+```{}
+Threshold <-  1
+
+DFGT1[DFGT1 < Threshold ] <- 0	# Absence
+DFGT1[DFGT1 >= Threshold ] <- 1	# Presence
+
+DFGT2[DFGT2 < Threshold ] <- 0	# Absence
+DFGT2[DFGT2 >= Threshold] <- 1	# Presence
+
+# A/P Percentage for each genus
+APpercent <- DFGT1 / DFGT2
+
+# Counting
+present <- data.frame(unlist(lapply(APpercent, function(x) c(length(which(x == 1))))))
+appear <- data.frame(unlist(lapply(APpercent, function(x) c(length(which(x == 0))))))
+disappear <- data.frame(unlist(lapply(APpercent, function(x) c(length(which(x == Inf))))))
+absent <- data.frame(unlist(lapply(APpercent, function(x) c(length(which(is.nan(x)))))))
+
+# change column names
+colnames(present)[1]  <- "present"
+colnames(absent)[1]  <- "absent"
+colnames(appear)[1]  <- "appear"
+colnames(disappear)[1]  <- "disappear"
+
+# Merge *
+OZIN <- cbind(present,absent,appear,disappear)
+
+```
+
+Mean relative abundance
+
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+#######
+# READ DATA
+#######
+DFGT1 <- read.csv("DF.GENUS.T1.MO.csv")
+DFGT2 <- read.csv("DF.GENUS.T2.MO.csv")
+
+# Change column to row names
+row.names(DFGT1) <- DFGT1$X
+row.names(DFGT2) <- DFGT2$X
+
+# Remove specific column
+DFGT1 <- DFGT1[ , !names(DFGT1) %in% c("X")]
+DFGT2 <- DFGT2[ , !names(DFGT2) %in% c("X")]
+#####################
+
+# Relative Abundance
+#######
+T.RA = function(x){
+  divide <- rowSums(x)
+  df <- x/divide
+  return(df)}
+#######
+DFGT1 <- T.RA(DFGT1)
+DFGT2 <- T.RA(DFGT2)
+
+
+Mean.RA.T1 <- as.data.frame(t(as.data.frame(lapply(DFGT1, mean))))
+colnames(Mean.RA.T1) <- 'Mean.RA'
+Mean.RA.T1 <- Mean.RA.T1 * 100
+```
+
+
+```{}
+TNN <- 101  # Number of microbes that pass threshold
+# Reorder OZIN by present microbes
+OZIN <- OZIN[order(OZIN$present,decreasing = TRUE ),]
+```
+
+
+Visualize
+
+```{}
+barplot(t(as.matrix(OZIN[1:200,])),col=c("green",'red',"white",'black'),las=2, cex.names= 0.3) # 200 should be TNN
+
+```
+
+```{}
+ggdf <-  OZIN[1:40,]['present'] # 50 SHOULD BE TNN
+ggdf$names <- rownames(ggdf)
+colnames(ggdf) <- c('VALUE','NAME')
+data2 <- ggdf                                          	 
+data2$NAME<- factor(data2$NAME,levels = data2$NAME[order(data2$VALUE)])
+ggplot(data2, aes(NAME, VALUE)) + geom_bar(stat = "identity", width=0.3, color='green') + coord_flip() + xlab('Genus') + ylab('Prevalence') + theme(panel.background = element_blank()) 
+```
+
+
+Microbes with highest prevalence across samples 
+
+```{}
+Tomi.name.finder = function(x,n){
+  x.names = order(x, decreasing = TRUE )
+  names <- rownames(x)[x.names[1:n]]
+  return(names) }
+####### 
+present.names <- Tomi.name.finder(OZIN[c(1)], TNN) # Top TNN microbes
+Tomi.microbes <- present.names
+```
+
+CLEAR WORKSPACE
+```{}
+rm(absent,appear,disappear,APpercent,DFGT1,DFGT2,ggdf,data2,Threshold,OZIN,Tomi.name.finder)
+```
+
+# Delta change
+```{}
+## Load Datasets
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+#######
+# READ DATA
+#######
+DFGT1 <- read.csv("DF.GENUS.T1.MO.csv")
+DFGT2 <- read.csv("DF.GENUS.T2.MO.csv")
+
+# Change column to row names
+row.names(DFGT1) <- DFGT1$X
+row.names(DFGT2) <- DFGT2$X
+
+# Remove specific column
+DFGT1 <- DFGT1[ , !names(DFGT1) %in% c("X")]
+DFGT2 <- DFGT2[ , !names(DFGT2) %in% c("X")]
+#####################
+
+#######
+# No Relative Abundance 
+#######
+
+# Select Top TNN microbes
+DFGT1 <- DFGT1[,c(present.names)]   
+DFGT2 <- DFGT2[,c(present.names)]
+```
+
+Delta Change 
+
+```{}
+Tomi.DC.Function = function(Early, Late, DC){
+  if (DC == 0 ){
+	return(as.data.frame(Late - Early))
+  }else if(DC == 3){
+	pseudo_early <- Early
+	pseudo_late <-  Late
+	return(as.data.frame (abs((pseudo_late - pseudo_early)) / ((pseudo_early + pseudo_late)/2)))
+  }else{
+	print("Provide valid DC")
+  } }
+Delta_change.third <-  Tomi.DC.Function(DFGT1, DFGT2, 3)
+```
+
+
+Other Delta change formulas
+```{}
+Tomi.DC.Function = function(Early, Late, DC){
+  if (DC == 0 ){
+	return(as.data.frame(abs(Late - Early)))
+  }else if(DC == 1){
+	pseudo_early <- Early
+	pseudo_late <-  Late
+	return(as.data.frame (abs(pseudo_late - pseudo_early) / pseudo_early))
+  }else if(DC == 2){
+	pseudo_early <- Early
+	pseudo_late <-  Late
+	return(as.data.frame (abs(pseudo_late - pseudo_early) / pseudo_late))
+  }else{
+	print("Provide valid DC")
+  } }
+Deltas <-  Tomi.DC.Function(DFGT1, DFGT2, 2)      
+```
+
+
+
+
+Check how many samples have zero at both time points T1 = 0 & T2 = 0 
+
+```{}
+T12.00 <- data.frame(unlist(lapply(Delta_change.third, function(x) c(length(which(is.nan(x)))))))
+colnames(T12.00) <- 'nothing'
+##T12.00 <- ((T12.00/nrow(Delta_change.third))*100)
+N <- rownames(T12.00)
+T12.00 <- cbind(N, T12.00)
+T12.00$N<- factor(T12.00$N,levels = T12.00$N[order(T12.00$nothing)])
+ggplot(T12.00, aes(N, nothing)) + geom_bar(stat = "identity", width=0.3) + coord_flip() + ggtitle('Samples with zeros at both time points') + xlab('Genus') +ylab('Count')
+###
+###
+```
+
+ Get delta change
+```{}
+
+#Order Delta change by median for each group
+Median_no_penalty <- as.data.frame(lapply(Delta_change.third[present.names], median, na.rm = TRUE))
+Median_no_penalty <- as.data.frame(t(Median_no_penalty))
+colnames(Median_no_penalty) <- 'Deltachange'
+#write.csv(Median_no_penalty,"DeltachangeGenus.csv", row.names = TRUE)
+```
+
+
+Visualize
+```{}
+# Function
+Tomi.name.finder.Delta = function(x,n){
+  x.names = order(x, decreasing = FALSE )
+  names <- rownames(x)[x.names[1:n]]
+  return(names) }
+
+third.boxplot <- Tomi.name.finder.Delta(Median_no_penalty,TNN)
+Delta_plot.T <- melt(Delta_change.third[third.boxplot], na.rm = TRUE)
+#######
+
+Delta_plot.T$value <- as.numeric(Delta_plot.T$value)
+#BOXPLOT
+Delta_plot.T %>%   
+  mutate(variable = fct_reorder(variable, value, .desc = TRUE)) %>%
+  ggplot( aes(x=variable, y=value, fill=variable)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(color="grey", size=0.03, alpha=0.1) +
+  theme(
+	legend.position="none",
+	plot.title = element_text(size=11)
+  ) +
+  ggtitle("") +
+  coord_flip() +
+  xlab("")+
+  ylab("Delta change")
+```
+
+
+
+CLEAR WORKSPACE
+```{}
+rm(Threshold,TNN,Tomi.name.finder,Delta_change.third,Delta_plot.T,DFGT1,DFGT2,median.DC,median.third.present,median.third.present.boxplot,N,present.names,T12.00,Tomi.DC.Function,Tomi.name.finder.Delta,third.boxplot)
+```
+
+
+Save Delta change
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+Deltachange<- merge(Median_no_penalty,present, by = 'row.names', all= FALSE)
+write.csv(Deltachange,  "Deltachange.csv", row.names = TRUE)
+```
+
+
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+#Deltachange <- read_csv('Deltachange.csv')
+ggplot(Deltachange) +
+  geom_point(aes( Deltachange, present), color = 'red') +
+  geom_text_repel(aes(Deltachange, present, label = Row.names)) +
+  theme_classic(base_size = 10)
+
+```
+
+
+
+Bubble plot & circular bar plot
+```{}
+
+PA.metrics <- merge(present, Mean.RA.T1, by = 'row.names', all= FALSE)
+row.names(PA.metrics) <- PA.metrics$Row.names
+PA.metrics <- subset(PA.metrics, select = c(present,Mean.RA))
+Stability_metrics <-  merge(PA.metrics, Median_no_penalty, by = 'row.names', all= FALSE)
+
+colnames(Stability_metrics) <- c('Genus','present','Mean.RA','Deltachange')
+
+```
+
+```{}
+# Bubble plot
+Stability_metrics%>%
+  arrange(desc(Mean.RA)) %>%
+  mutate(Genus = factor(Genus, Genus)) %>%
+  ggplot(aes(x=Deltachange, y=present, size = Mean.RA, color=Phylum)) +
+    geom_point(alpha=0.5) +
+    scale_size(range = c(.1, 24), name="Mean relative abundance")
+
+```
+
+Taxonomy
+```{}
+
+Taxonomy <- subset(Taxonomy, select = c(Phylum, Genus))
+Taxonomy <- unique(Taxonomy[,c('Phylum','Genus')])
+Stability_metrics <- merge(Stability_metrics,Taxonomy, by = 'Genus', all= FALSE)
+```
+
+
+Prepare microbial abundance data
+
+```{}
+setwd('/home/tomi/Desktop/Arena/HeliusBoth')
+df <- readRDS("HELIUS_N4117_16S_H1.RDS")
+
+#Agglomerating
+df_Genus <- tax_glom(df, "Genus")
+
+taxa_names(df_Genus) <- tax_table(df_Genus)[, 6] # Changing names for clarity
+
+DF.GENUS.T <- df_Genus
+
+OTU1 = as(otu_table(DF.GENUS.T), "matrix")
+# transpose if necessary
+if(taxa_are_rows(DF.GENUS.T)){OTU1 <- t(OTU1)}
+# Coerce to data.frame
+OTUdf = as.data.frame(OTU1)
+
+#########
+#########
+write.csv(OTUdf,"/home/tomi/Desktop/Arena/HeliusBoth/DF.GENUS.T.csv", row.names = TRUE)
+# Read dataframe
+DFGT <- read.csv("/home/tomi/Desktop/Arena/HeliusBoth/DF.GENUS.T.csv")
+# Reorder Dataframe
+DFGT <- DFGT[order(DFGT$X),]
+write.csv(DFGT,"/home/tomi/Desktop/Arena/HeliusBoth/DF.GENUS.T.MO.csv", row.names = FALSE)
+#########
+
+
+
+```
+
+
+
+Separate microbes that intersect in small and big dataset
+
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+DFGT <- read.csv("DF.GENUS.T.MO.csv")
+ID <- DFGT$X
+row.names(DFGT) <- DFGT$X
+DFGT <- DFGT[ , !names(DFGT) %in% c("X")]
+
+####
+####
+T.Microbes <- colnames(DFGT)
+Merged.Microbes <- intersect(Tomi.microbes,T.Microbes)
+####
+####
+rm(ID,DFGT,T.Microbes,Tomi.microbes)
+
+```
+
+
+```{}
+#######
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+DFGT <- read.csv("DF.GENUS.T.MO.csv")
+ID <- DFGT$X
+row.names(DFGT) <- DFGT$X
+DFGT <- DFGT[ , !names(DFGT) %in% c("X")]
+
+# Select Merged Microbes
+DFGT <- DFGT[,c(Merged.Microbes)] 
+rm(ID)
+```
+
+Separate microbes to quantitative / binary traits 
+Visualize zero skewed distribution of abundance
+
+```{}
+percentage_of_zeros_DFGT <- as.data.frame(colSums(DFGT== 0)/nrow(DFGT)*100)
+colnames(percentage_of_zeros_DFGT) <- 'Zero_percent'
+
+N <- rownames(percentage_of_zeros_DFGT)
+percentage_of_zeros_DFGT <- cbind(N,percentage_of_zeros_DFGT)
+
+percentage_of_zeros_DFGT$N<- factor(percentage_of_zeros_DFGT$N,levels = percentage_of_zeros_DFGT$N[order(percentage_of_zeros_DFGT$Zero_percent)])
+# ggplot(percentage_of_zeros_DFGT , aes(N, Zero_percent)) + geom_bar(stat = "identity", width=0.3) + coord_flip() + ggtitle('Zero abundance') + xlab('Genus') +ylab('percentage of zeros')
+
+```
+
+
+Density plot
+Before transformation
+```{}
+Blautia <- ggdensity(DFGT$Blautia, fill = "lightgray", title = 'Blautia-0%', xlab = FALSE)
+Bacteroides <- ggdensity(DFGT$Bacteroides, fill = "lightgray", title ='Bacteroides-0%',xlab = FALSE)
+Faecalibacterium <- ggdensity(DFGT$Faecalibacterium, fill = "lightgray", title ='Faecalibacterium-0%',xlab = FALSE)
+Oscillibacter <- ggdensity(DFGT$Oscillibacter, fill = "lightgray", title ='Oscillibacter-6%',xlab = FALSE)
+Romboutsia <- ggdensity(DFGT$Romboutsia, fill = "lightgray", title ='Romboutsia-10%',xlab = FALSE)
+ggarrange(Faecalibacterium,Blautia,Bacteroides,Oscillibacter,Romboutsia, title='') 
+```
+
+After transformation
+```{}
+Blautia <- ggdensity(log10(DFGT$Blautia+1), fill = "lightgray", title = 'Blautia-0%', xlab = FALSE)
+Bacteroides <- ggdensity(log10(DFGT$Bacteroides+1), fill = "lightgray", title ='Bacteroides-0%',xlab = FALSE)
+Faecalibacterium <- ggdensity(log10(DFGT$Faecalibacterium+1), fill = "lightgray", title ='Faecalibacterium-0%',xlab = FALSE)
+Oscillibacter <- ggdensity(log10(DFGT$Oscillibacter+1), fill = "lightgray", title ='Oscillibacter-6%',xlab = FALSE)
+Romboutsia <- ggdensity(log10(DFGT$Romboutsia+1), fill = "lightgray", title ='Romboutsia-10%',xlab = FALSE)
+ggarrange(Faecalibacterium,Blautia,Bacteroides,Oscillibacter,Romboutsia, title='pseudocount-1/ log10 transformed') 
+```
+
+
+Separate microbes to quantitative / binary traits to combat zero skewed distribution of abundance
+Zero abundance border of 5%
+
+```{}
+quantitative.merged.microbes <- subset(percentage_of_zeros_DFGT , Zero_percent <= 5 )
+quantitative.merged.microbes <- as.character(quantitative.merged.microbes$N)
+
+binary.merged.microbes <- subset(percentage_of_zeros_DFGT , Zero_percent > 5 )
+binary.merged.microbes <- as.character(binary.merged.microbes$N)
+
+####
+####
+rm(DFGT,percentage_of_zeros_DFGT,Merged.Microbes,N)
+
+```
+
+Make list of individuals
+
+```{}
+Metadata <- read.csv('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/HELIUS_N4117_metadat.csv', sep = ';')
+colnames(Metadata) = c("ID1","Ethnicity","Age","Sex","BMI")
+
+na_count <-sapply(Metadata, function(x) sum(length(which(is.na(x)))))
+print(na_count)
+Metadata <- Metadata [!is.na(Metadata$BMI),] # Drop row with Null value in BMI
+
+indi.list <- subset(Metadata, select = c('ID1'))
+indi.list$ID2 <- indi.list$ID1
+
+setwd("/home/tomi/Desktop/Arena/GENUS_RMD/GCTA")
+#write.table(indi.list,  file = "indi.list", sep = "\t", dec = ".",
+#        	row.names = FALSE, col.names = FALSE)
+```
+
+# Genome-wide complex trait analysis
+
+Reading microbial traits into phenotype files for GCTA
+
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+DFGT <- read.csv("DF.GENUS.T.MO.csv")
+ID <- DFGT$X
+row.names(DFGT) <- DFGT$X
+DFGT <- DFGT[ , !names(DFGT) %in% c("X")]
+rm(ID)
+
+####
+####
+DFGT$IDs <- row.names(DFGT)
+DFGT = DFGT  %>%  filter(IDs %in% c(indi.list$ID1))
+row.names(DFGT) <- DFGT$IDs
+####
+####
+
+
+QMM <- DFGT[,c(quantitative.merged.microbes)] 
+BMM <- DFGT[,c(binary.merged.microbes)] 
+rm(DFGT)
+
+```
+
+
+
+GCTA-GREML analysis for a case-control study
+
+For a case-control study, the phenotypic values of cases and controls should be specified as 1 and 0, respectively. 
+
+TRANSFORMATION
+```{}
+QMM1 <- log10((QMM + 1 ))
+####
+####
+Threshold <-  1
+BMM[BMM < Threshold ] <- 0	# Absence
+BMM[BMM >= Threshold ] <- 1	# Presence
+####
+####
+
+
+
+# Indexing
+BMM$X <- row.names(BMM)
+BMM$XX <- row.names(BMM)
+#
+QMM$X <- row.names(QMM)
+QMM$XX <- row.names(QMM)
+####
+####
+
+
+setwd("/home/tomi/Desktop/Arena/GENUS_RMD/GCTA/genusphenotypes/QMM")
+for (i in quantitative.merged.microbes){
+  phenotype  <- QMM[,c('X','XX', i)]
+  phenotype$X <- strtoi(phenotype$X)
+  phenotype$XX <- strtoi(phenotype$XX)
+  write.table(phenotype,  file = paste(i,'.phe', sep =''), sep = "\t", dec = ".", row.names = FALSE, col.names = FALSE)
+}
+
+####
+####
+
+setwd("/home/tomi/Desktop/Arena/GENUS_RMD/GCTA/genusphenotypes/BMM")
+for (i in binary.merged.microbes){
+  phenotype  <- BMM[,c('X','XX', i)]
+  phenotype$X <- strtoi(phenotype$X)
+  phenotype$XX <- strtoi(phenotype$XX)
+  write.table(phenotype,  file = paste(i,'.phe', sep =''), sep = "\t", dec = ".", row.names = FALSE, col.names = FALSE)
+}
+
+```
+
+
+```{}
+# CLEAR WORKSPACE
+rm(list=ls())
+```
+
+
+
+```{}
+./RUN1 - BASH Script
+
+'''                #!/bin/bash
+                   echo 'Running GCTA'
+                   ./gcta-1.94.1 --bfile qc_10_12_19_hwe00001 --keep indi.list  --autosome  --make-grm  --out  matrix
+                   ./gcta-1.94.1  --grm-bin  matrix  --pca 10  --out EV 
+'''
+```
+
+Check Eigenvectors from GCTA
+
+```{}
+# PCA SCREE PLOT
+Eigenval = read.table( "/home/tomi/Desktop/Arena/GENUS_RMD/GCTA/EV.eigenval" )
+Eigenval <- Eigenval[1:10,]
+num = 1:10
+plot(num,Eigenval, xlab ="Principal Components", ylab="Eigenvalue", col="dark blue") 
+####
+
+```
+
+
+Make covariate files for GCTA Analysis
+```{}
+Eigenvectors <- read.table('/home/tomi/Desktop/Arena/GENUS_RMD/GCTA/EV.eigenvec')
+Metadata <- read.csv('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/HELIUS_N4117_metadat.csv', sep = ';')
+
+colnames(Eigenvectors) = c("ID1","ID2","PC1","PC2","PC3","PC4","PC5", "PC6","PC7","PC8","PC9","PC10")
+colnames(Metadata) = c("ID1","Ethnicity","Age","Sex","BMI")
+
+# Inner join
+PCA.DF <- merge(Metadata, Eigenvectors, by = 'ID1', all= FALSE)
+# Relocate ID
+PCA.DF <- PCA.DF %>% relocate(ID2, .before = Ethnicity)
+
+# Visualize
+ggp1 <- ggplot(PCA.DF,aes(x = PC1, y = PC2, color = Ethnicity)) + geom_point(size=0.5)
+ggp2 <- ggplot(PCA.DF,aes(x = PC2, y = PC3, color = Ethnicity)) + geom_point(size=0.5)
+ggp3 <- ggplot(PCA.DF,aes(x = PC3, y = PC4, color = Ethnicity)) + geom_point(size=0.5)
+ggp4 <- ggplot(PCA.DF,aes(x = PC4, y = PC5, color = Ethnicity)) + geom_point(size=0.5)
+ggp5 <- ggplot(PCA.DF,aes(x = PC5, y = PC6, color = Ethnicity)) + geom_point(size=0.5)
+ggp6 <- ggplot(PCA.DF,aes(x = PC6, y = PC7, color = Ethnicity)) + geom_point(size=0.5)
+ggp7<- ggplot(PCA.DF,aes(x = PC7, y = PC8, color = Ethnicity)) + geom_point(size=0.5)
+ggp8 <- ggplot(PCA.DF,aes(x = PC8, y = PC9, color = Ethnicity)) + geom_point(size=0.5)
+ggp9 <- ggplot(PCA.DF,aes(x = PC9, y = PC10, color = Ethnicity)) + geom_point(size=0.5)
+
+#grid.arrange(ggp1,ggp2,ggp3,ggp4,ggp5,ggp6,ggp7,ggp8,ggp9,ncol = 3)
+grid.arrange(ggp1,ggp7,ncol = 1)
+####
+
+# Ensure no missing values
+na_count <-sapply(PCA.DF, function(x) sum(length(which(is.na(x)))))
+print(na_count)
+```
+
+
+```{}
+quantitative.covariates <- subset(PCA.DF, select = c('ID1','ID2',"PC1","PC2","PC3","PC4","PC5",'PC6','PC7','Age',"BMI"))
+
+# Scale Age and BMI
+quantitative.covariates <- quantitative.covariates %>% mutate_at(c('Age',"BMI"), ~(scale(.) %>% as.vector))
+####
+####
+discrete.covariates<- subset(PCA.DF, select = c('ID1','ID2','Sex'))
+####
+####
+
+# Save covariates
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/GCTA')
+#write.table(quantitative.covariates,  file = "quantitative.covariates", sep = "\t", dec = ".",
+ #       	row.names = FALSE, col.names = FALSE)
+
+#write.table(discrete.covariates,  file = "discrete.covariates", sep = "\t", dec = ".",
+ #       	row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+```
+
+
+
+```{r}
+# CLEAR WORKSPACE
+rm(list=ls())
+```
+
+
+
+Quantitative phenotype
+```{}
+
+./RUN2 - BASH Script
+
+#!/bin/bash
+
+echo 'Welcome!  ....'
+echo '	'
+echo 'Running GCTA'
+
+
+echo 'Move matrix to phenotype folder'
+mv quantitative.covariates discrete.covariates matrix.grm.bin matrix.grm.id matrix.grm.N.bin matrix.log gcta-1.94.1  /home/tomi/Desktop/Arena/GENUS_RMD/GCTA/genusphenotypes/QMM
+cd genusphenotypes/QMM
+for f  in *.phe ;  do
+	echo $f
+        echo '----------------------------------------------------------------------------------------------------||||||----- ' 
+        ./gcta-1.94.1  --reml  --grm matrix  --pheno $f  --qcovar quantitative.covariates --covar discrete.covariates --out  $f
+done
+mv *.hsq /home/tomi/Desktop/Arena/GENUS_RMD/GCTA/heritability/QMM
+mv *.log /home/tomi/Desktop/Arena/GENUS_RMD/GCTA/heritability/LOG
+mv quantitative.covariates discrete.covariates  matrix.grm.bin matrix.grm.id matrix.grm.N.bin matrix.log gcta-1.94.1 /home/tomi/Desktop/Arena/GENUS_RMD/GCTA
+
+```
+
+Binary Phenotype
+```{}
+./RUN3 - BASH Script
+
+#!/bin/bash
+
+echo 'Welcome!  ....'
+echo '	'
+echo 'Running GCTA'
+
+
+echo 'Move matrix to phenotype folder'
+mv quantitative.covariates discrete.covariates matrix.grm.bin matrix.grm.id matrix.grm.N.bin matrix.log gcta-1.94.1  /home/tomi/Desktop/Arena/GENUS_RMD/GCTA/genusphenotypes/BMM
+cd genusphenotypes/BMM
+for f  in *.phe ;  do
+	echo $f
+        echo '----------------------------------------------------------------------------------------------------||||||----- ' 
+        ./gcta-1.94.1  --reml  --grm matrix  --pheno $f  --qcovar quantitative.covariates --covar discrete.covariates --out  $f
+done
+mv *.hsq /home/tomi/Desktop/Arena/GENUS_RMD/GCTA/heritability/BMM
+mv *.log /home/tomi/Desktop/Arena/GENUS_RMD/GCTA/heritability/LOG
+mv quantitative.covariates discrete.covariates  matrix.grm.bin matrix.grm.id matrix.grm.N.bin matrix.log gcta-1.94.1 /home/tomi/Desktop/Arena/GENUS_RMD/GCTA
+
+```
+
+
+
+Visualize GCTA results
+Quantitative
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD')
+path <- '/home/tomi/Desktop/Arena/GENUS_RMD/GCTA/heritability/QMM'
+f <- list.files(path)
+fnF <- file.path(path, f)
+
+QMM.MATRIX <- data.frame()
+
+for(i in 1:length(fnF)){
+  xx <- read.delim(fnF[i])
+  xx <- xx[1,]
+  xx$Source <- gsub('.{8}$','',f[i])
+  QMM.MATRIX <- rbind(QMM.MATRIX,xx)
+}
+
+rm(xx,f,fnF,i,path)
+```
+
+Visualize HERITABILITY & STANDARD ERROR
+```{}
+
+QMM.MATRIX <- QMM.MATRIX[order(QMM.MATRIX$Variance,decreasing = FALSE ),]
+# Factor
+QMM.MATRIX$Source <- factor(QMM.MATRIX$Source, levels = QMM.MATRIX$Source)
+ggplot(QMM.MATRIX, aes(x = Variance, y = Source, xmin = Variance - SE , xmax = Variance + SE)) +
+  geom_point(size = 3) +
+  geom_errorbarh(height=.1 , colour = 'red') +
+  theme_classic()+
+  xlab("Heritability") + ylab("")
+
+
+
+```
+
+
+Binary
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD')
+path <- '/home/tomi/Desktop/Arena/GENUS_RMD/GCTA/heritability/BMM'
+f <- list.files(path)
+fnF <- file.path(path, f)
+
+BMM.MATRIX <- data.frame()
+
+for(i in 1:length(fnF)){
+  xx <- read.delim(fnF[i])
+  xx <- xx[1,]
+  xx$Source <- gsub('.{8}$','',f[i])
+  BMM.MATRIX <- rbind(BMM.MATRIX,xx)
+}
+
+rm(xx,f,fnF,i,path)
+```
+
+
+```{}
+
+BMM.MATRIX <- BMM.MATRIX[order(BMM.MATRIX$Variance,decreasing = FALSE ),]
+# Factor
+BMM.MATRIX$Source <- factor(BMM.MATRIX$Source, levels = BMM.MATRIX$Source)
+ggplot(BMM.MATRIX, aes(x = Variance, y = Source, xmin = Variance - SE , xmax = Variance + SE)) +
+  geom_point(size = 3) +
+  geom_errorbarh(height=.1 , colour = 'red') +
+  theme_classic()+
+  xlab("Heritability") + ylab("")
+
+
+```
+
+
+Import Delta change 
+```{}
+# APPEND DELTA
+deltachange <- read.csv("/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF/Deltachange.csv")
+colnames(deltachange) <- c('Genus','Deltachange')
+####
+####
+
+colnames(QMM.MATRIX) <- c('Genus','Heritability','SE')
+QMM.MATRIX <- merge(QMM.MATRIX,deltachange, by='Genus', all = FALSE)
+
+colnames(BMM.MATRIX) <- c('Genus','Heritability','SE')
+BMM.MATRIX <- merge(BMM.MATRIX,deltachange, by='Genus', all = FALSE)
+
+#setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+
+```
+
+
+Visualize Quantitative
+```{}
+ggscatter(QMM.MATRIX, x = "Deltachange", y = "Heritability",
+      	add = "reg.line", conf.int = TRUE,
+      	cor.coef = TRUE, cor.method = "spearman",
+      	xlab = "Delta-change", ylab = "Heritability", title = " Penalty")
+
+```
+
+```{}
+ggplot(QMM.MATRIX) +
+  geom_point(aes(Deltachange, Heritability), color = 'red') +
+  geom_text_repel(aes(Deltachange, Heritability, label = Genus)) +
+  theme_classic(base_size = 10)
+
+```
+
+Visualize Binary
+```{}
+ggscatter(BMM.MATRIX, x = "Deltachange", y = "Heritability",
+      	add = "reg.line", conf.int = TRUE,
+      	cor.coef = TRUE, cor.method = "spearman",
+      	xlab = "Delta-change", ylab = "Heritability", title = " Penalty")
+
+```
+
+```{}
+ggplot(BMM.MATRIX) +
+  geom_point(aes(Deltachange, Heritability), color = 'red') +
+  geom_text_repel(aes(Deltachange, Heritability, label = Genus)) +
+  theme_classic(base_size = 10)
+
+```
+
+
+
+
+
+
+
+# Genome-wide association studies
+
+```{}
+# CLEAR WORKSPACE
+rm(list=ls())
+```
+
+
+```{} 
+./RUN1 - BASH Script
+
+ '''  #!/bin/bash
+      echo 'Running GWAS'
+      # Obtain Eigenvalues and Eigenvectors
+      ./plink2 --bfile qc_10_12_19_hwe00001  --pca  --keep indi.list  
+      ./plink2 --bfile qc_10_12_19_hwe00001  --freq  --keep indi.list  
+
+ '''
+```
+
+Prepare phenotype files for GWAS 
+
+```{} 
+Eigenvectors <- read.table('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/plink2.eigenvec')
+Metadata <- read.csv('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/HELIUS_N4117_metadat.csv', sep = ';')
+colnames(Eigenvectors) = c("ID1","ID2","PC1","PC2","PC3","PC4","PC5", "PC6","PC7","PC8","PC9","PC10")
+colnames(Metadata) = c("ID1","Ethnicity","Age","Sex","BMI")
+
+# Inner join
+PCA.DF <- merge(Metadata, Eigenvectors, by = 'ID1', all= FALSE)
+# Relocate ID
+PCA.DF <- PCA.DF %>% relocate(ID2, .before = Ethnicity)
+
+
+covariates <- subset(PCA.DF, select = c('ID1','ID2',"PC1","PC2","PC3","PC4","PC5",'PC6',"PC7",'Age',"BMI"))
+colnames(covariates) = c('#FID','IID',"PC1","PC2","PC3","PC4","PC5",'PC6',"PC7", 'Age',"BMI")
+# Scale Age and BMI
+covariates <- covariates %>% mutate_at(c('Age',"BMI"), ~(scale(.) %>% as.vector))
+
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS')
+#write.table(covariates,  file = "covariates", sep = "\t", dec = ".", row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+rm(Eigenvectors,Metadata,PCA.DF)
+
+```
+
+
+
+Reading big data into QMM phenotype files for big GWAS
+```{} 
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+DFGT <- read.csv("DF.GENUS.T.MO.csv")
+ID <- DFGT$X
+row.names(DFGT) <- DFGT$X
+DFGT <- DFGT[ , !names(DFGT) %in% c("X")]
+rm(ID)
+####
+####
+####
+DFGT$IDs <- row.names(DFGT)
+DFGT = DFGT  %>%  filter(IDs %in% c(indi.list$ID1))
+row.names(DFGT) <- DFGT$IDs
+####
+####
+
+####
+QMM <- DFGT[,c(quantitative.merged.microbes)] 
+rm(DFGT)
+
+
+QMM <- log10((QMM + 1 ))
+
+# Indexing
+QMM$X <- row.names(QMM)
+QMM$XX <- row.names(QMM)
+####
+####
+Phenotype_extension <- subset(covariates, select = c("#FID","PC1","PC2","PC3","PC4","PC5","PC6","PC7","Age","BMI"))
+
+
+
+setwd("/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/")
+###
+###
+for (i in quantitative.merged.microbes){
+  phenotype  <- QMM[,c('X','XX', i)]
+  phenotype$X <- strtoi(phenotype$X)
+  phenotype$XX <- strtoi(phenotype$XX)
+  colnames(phenotype) = c('#FID','IID','phenotype')
+  phenotype <- merge(phenotype, Phenotype_extension , by = '#FID', all= FALSE)
+  write.table(phenotype,  file = paste(i,'.phe', sep =''), sep = "\t", dec = ".", row.names = FALSE, col.names = TRUE ,quote = FALSE)
+}
+
+```
+
+
+
+```{} 
+./RUN2 - BASH Script
+
+#!/bin/bash
+
+echo 'Welcome!  ....'
+echo '	'
+echo 'Running GWAS'
+
+
+for f  in *.phe ;  do
+	echo $f
+        echo '----------------------------------------------------------------------------------------------------||||||----- ' 
+        # Linear regression with covariate
+        ./plink2 --bfile qc_10_12_19_hwe00001 --prune --pheno $f  --pheno-name phenotype --glm sex --covar  covariates  --covar-name  PC1 PC2 PC3 PC4 PC5 PC6 PC7 Age BMI --adjust --out $f
+done
+
+
+mv *.adjusted /home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/adjusted
+mv *.linear /home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/non_adjusted
+mv *.phe /home/tomi/Desktop/Arena/GENUS_RMD/GWAS/genusphenotypes
+mv *.log /home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/log
+
+```
+
+
+
+Reading abundance data into BMM phenotype files for GWAS 
+Case/control phenotypes are expected to be encoded as 1=unaffected (control), 2=affected (case)
+
+```{} 
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/HeliusBoth/DF')
+DFGT <- read.csv("DF.GENUS.T.MO.csv")
+ID <- DFGT$X
+row.names(DFGT) <- DFGT$X
+DFGT <- DFGT[ , !names(DFGT) %in% c("X")]
+rm(ID)
+####
+####
+####
+DFGT$IDs <- row.names(DFGT)
+DFGT = DFGT  %>%  filter(IDs %in% c(indi.list$ID1))
+row.names(DFGT) <- DFGT$IDs
+####
+####
+
+####
+BMM <- DFGT[,c(binary.merged.microbes)] 
+rm(DFGT)
+
+
+
+
+Threshold <- 1
+BMM[BMM >= Threshold ] <- 2	# Presence
+BMM[BMM < Threshold ] <- 1	# Absence
+####
+####
+
+
+
+# Indexing
+BMM$X <- row.names(BMM)
+BMM$XX <- row.names(BMM)
+####
+####
+Phenotype_extension <- subset(covariates, select = c("#FID","PC1","PC2","PC3","PC4","PC5","PC6","PC7","Age","BMI"))
+
+
+
+setwd("/home/tomi/Desktop/Arena/GENUS_RMD/GWAS_BINARY/")
+###
+###
+for (i in binary.merged.microbes){
+  phenotype  <- BMM[,c('X','XX', i)]
+  phenotype$X <- strtoi(phenotype$X)
+  phenotype$XX <- strtoi(phenotype$XX)
+  colnames(phenotype) = c('#FID','IID','phenotype')
+  phenotype <- merge(phenotype, Phenotype_extension , by = '#FID', all= FALSE)
+  write.table(phenotype,  file = paste(i,'.phe', sep =''), sep = "\t", dec = ".", row.names = FALSE, col.names = TRUE ,quote = FALSE)
+}
+
+```
+
+
+Manhattan plot for single microbe
+
+```{} 
+#setwd('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS_BINARY/Results/adjusted/')
+#CSP   <- read.table('Lachnospiraceae_UCG.008.phe.phenotype.glm.logistic.hybrid.adjusted')
+
+
+
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/adjusted/')
+CSP   <- read.table('Subdoligranulum.phe.phenotype.glm.linear.adjusted') 
+
+
+CSP <- subset(CSP, select = c('V1','V2','V4'))
+
+L   <- read.table('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/qc_10_12_19_hwe00001.bim')
+L <- subset(L, select = c('V2','V4'))
+
+MAN <- merge(CSP,L,by='V2')
+
+# Make the Manhattan plot on the gwasResults dataset
+manhattan(MAN, chr="V1", bp="V4.y", snp="V2", p="V4.x" , annotatePval = 0.05)
+
+```
+
+
+Quantile-Quantile plot 
+```{} 
+qq(MAN$V4.x)
+
+```
+
+Data frame of Significant SNP's for all microbes
+```{} 
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/adjusted/')
+path <- "/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/adjusted/"
+Result_files <- list.files(path)
+
+GWAS_Results = data.frame()
+
+for (Microbe in Result_files){
+    CSP   <- read.table(Microbe)
+    colnames(CSP) = c("CHROM",	"ID",	"A1",	"UNADJ",	"GC",	"BONF",	"HOLM",	"SIDAK_SS",	"SIDAK_SD",	"FDR_BH",	"FDR_BY")
+    CSP <- subset(CSP, select = c("CHROM","ID",	"BONF" ,"UNADJ"))
+    CSP <- subset(CSP, BONF < 0.05)  
+    if (dim(CSP)[1] != 0){
+        Microbe <- sub('.phe.*',"",Microbe)
+        CSP$Microbe <- Microbe
+        GWAS_Results <- bind_rows(GWAS_Results,CSP)}
+}
+
+print('Significant SNPs')
+print('')
+print(GWAS_Results)
+```
+
+Visualize
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/adjusted/')
+path <- "/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/adjusted/"
+Result_files <- list.files(path)
+
+GWAS_Results = data.frame()
+
+for (Microbe in Result_files){
+    CSP   <- read.table(Microbe)
+    colnames(CSP) = c("CHROM",	"ID",	"A1",	"UNADJ",	"GC",	"BONF",	"HOLM",	"SIDAK_SS",	"SIDAK_SD",	"FDR_BH",	"FDR_BY")
+    CSP <- subset(CSP, select = c("CHROM","ID",	"BONF" ,"UNADJ"))
+    CSP <- subset(CSP, UNADJ < 1e-06)  
+    if (dim(CSP)[1] != 0){
+        Microbe <- sub('.phe.*',"",Microbe)
+        CSP$Microbe <- Microbe
+        GWAS_Results <- bind_rows(GWAS_Results,CSP)}
+}
+
+
+L   <- read.table('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/qc_10_12_19_hwe00001.bim')
+L <- subset(L, select = c('V2','V4'))
+colnames(L) <-c('ID', 'location') 
+
+
+snps.of.interest <- c(GWAS_Results$Microbe)
+rm(CSP,Microbe,path,Result_files)
+```
+
+```{}
+grid.table(GWAS_Results)
+```
+
+
+PADDING
+```{} 
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/adjusted/')
+CSP   <- read.table('Bifidobacterium.phe.phenotype.glm.linear.adjusted')
+colnames(CSP) = c("CHROM",	"ID",	"A1",	"UNADJ",	"GC",	"BONF",	"HOLM",	"SIDAK_SS",	"SIDAK_SD",	"FDR_BH",	"FDR_BY")
+CSP <- subset(CSP, select = c("CHROM","ID",	"BONF" ,"UNADJ"))
+CSP <- subset(CSP, UNADJ > 1e-07)  
+CSP$Microbe <- 'PAD'
+GWAS_Results <- bind_rows(GWAS_Results,CSP)
+
+```
+
+
+```{}
+MAN <- merge(GWAS_Results,L,by='ID')
+# Make the Manhattan plot on the gwasResults dataset
+manhattan(MAN, chr="CHROM", bp="location", snp="Microbe", p="UNADJ",highlight = snps.of.interest, annotatePval = 5.e-07,annotateTop = FALSE)
+```
+
+
+```{}
+bar <- as.data.frame(table(MAN$Microbe))
+bar$Freq<- as.numeric(bar$Freq)
+colnames(bar) <- c('name','val')
+bar  %>%
+  mutate(name = fct_reorder(name, val)) %>%
+  ggplot( aes(x=name, y=val)) +
+    geom_bar(stat="identity", fill="grey", alpha=.5, width=.3) +
+    coord_flip() +
+    xlab("")+
+    ylab('# SNP')
+    theme_classic()
+
+```
+
+
+```{}
+grid.table(GWAS_Results)
+```
+
+# Mendilian randomization
+
+Harmonise
+
+Action:
+1. Assume all alleles are presented on the forward strand
+2. Try to infer the forward strand alleles using allele frequency information
+3. Correct the strand for non-palindromic SNPs, but drop all palindromic SNPs
+
+After data is harmonised ensure to drop duplicate exposure-outcome summary 
+sets this can occur  when a GWAS consortium has released multiple results 
+from separate GWAS analyses for the same trait
+
+MR Function at bottom of page...
+
+
+
+# ASV
+########################
+##################
+
+```{}
+# ASV LEVEL BEGINS
+########################
+print('GOOD BYE TO GENUS LEVEL')
+print('--')
+print('WELCOME TO ASV')
+
+```
+
+Load Phyloseq 
+```{}
+# ASV LEVEL
+
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth")
+df <- readRDS("ps.HELIUS.pictures.H1H2.RDS")
+```
+
+
+Reassign Taxonomy
+```{}
+taxonomy <- as.data.frame(tax_table(df)) 
+#
+seqs <- c(row.names(taxonomy))
+set.seed(100) # Initialize random number generator for reproducibility
+taxa <- assignTaxonomy(seqs, "/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/silva_nr_v132_train_set.fa", multithread=20)   # GENUS
+taxa.plus <- addSpecies(taxa, "/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/silva_species_assignment_v132.fa", verbose=TRUE)  # SPECIES
+taxa.plus <- as.data.frame(taxa.plus)
+#
+asv <- paste0("ASV_", 1:dim(otu_table(df))[2])
+taxa.plus$ASV <- asv
+
+taxx <- as(taxa.plus,'matrix')
+taxx <- tax_table(taxx)
+tax_table(df) <- taxx
+
+# change tag
+taxa_names(df) <- asv
+#
+rm(taxa,taxonomy,asv,seqs,taxx)
+```
+
+write taxonomy
+```{}
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/DF")
+taxa.plus$amplicon.seqs <- row.names(taxa.plus) 
+write.csv(taxa.plus,"Taxonomy.csv", row.names = FALSE)
+```
+
+
+```{}
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/DF")
+# Data preparation
+#########
+#########
+# Sepearte Timepoint1  and  Timepoint2
+DF.ASV.T1 <- subset_samples(df, Time_Point == "H1")
+DF.ASV.T2 <- subset_samples(df, Time_Point == "H2")
+
+# Create a function
+extract.transpose <- function(DF.ASV) {
+  # Extract abundance matrix from the phyloseq object
+  OTU1 = as(otu_table(DF.ASV), "matrix")
+  # transpose if necessary
+  if(taxa_are_rows(DF.ASV)){OTU1 <- t(OTU1)}
+  # Coerce to data.frame
+  OTUdf = as.data.frame(OTU1)
+  return(OTUdf)
+}
+
+DFGT1 <- extract.transpose(DF.ASV.T1)
+DFGT2 <- extract.transpose(DF.ASV.T2)
+
+#Get row names of both data frames
+Namest1 <- rownames(DFGT1)
+Namest2 <- rownames(DFGT2)
+
+#convert names to only ID
+ID1 <-  sub('H1.', '', Namest1)
+ID2 <-  sub('H2.', '', Namest2)
+
+
+# Get non paired subjects
+npaired1 <- c(setdiff(ID1, ID2))  # whats in 1 not in 2
+npaired2 <- c(setdiff(ID2, ID1))  # whats in 2 not in 1
+
+npaired1 <- unlist(lapply(npaired1, function(x) c(paste("H1", x , sep = "."))))
+npaired2 <- unlist(lapply(npaired2, function(x) c(paste("H2", x , sep = "."))))
+
+# Drop unpaired rows
+DFGT1 <- subset(DFGT1,!(row.names(DFGT1) %in% npaired1))
+DFGT2 <- subset(DFGT2,!(row.names(DFGT2) %in% npaired2))
+
+
+DFGT1$X <- row.names(DFGT1)
+DFGT2$X <- row.names(DFGT2)
+
+
+# Reorder Dataframe*
+DFGT1 <- DFGT1[order(DFGT1$X),]
+DFGT2 <- DFGT2[order(DFGT2$X),]
+
+write.csv(DFGT1,"DF.ASV.T1.MO.csv", row.names = FALSE)
+write.csv(DFGT2,"DF.ASV.T2.MO.csv", row.names = FALSE)
+
+
+rm(Namest1,Namest2,ID1,ID2,npaired1,npaired2,extract.transpose,DFGT1,DFGT2,DF.ASV.T1,DF.ASV.T2,df)
+```
+
+
+
+Load data
+```{}
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/DF")
+#####################
+# READ DATA
+#####################
+
+DFGT1 <- read.csv("DF.ASV.T1.MO.csv")
+DFGT2 <- read.csv("DF.ASV.T2.MO.csv")
+
+# Change column to row names
+row.names(DFGT1) <- DFGT1$X
+row.names(DFGT2) <- DFGT2$X
+
+# Remove specific column
+DFGT1 <- DFGT1[ , !names(DFGT1) %in% c("X")]
+DFGT2 <- DFGT2[ , !names(DFGT2) %in% c("X")]
+
+#####################
+# Relative Abundance not needed
+####################
+
+#######
+#######
+```
+
+
+
+
+Prevalence
+
+1/1 = 1 , 1/0  = Inf , 0/1 = 0 , 0/0 = NaN
+
+```{}
+#####################
+# PRESENCE / ABSENCE
+#####################
+
+Threshold <-  1
+
+DFGT1[DFGT1 < Threshold ] <- 0    # Absence
+DFGT1[DFGT1 >= Threshold ] <- 1    # Presence
+
+DFGT2[DFGT2 < Threshold ] <- 0    # Absence
+DFGT2[DFGT2 >= Threshold] <- 1    # Presence
+
+
+
+# A/P Percentage for each genus
+APpercent <- DFGT1 / DFGT2
+
+# Counting
+present <- data.frame(unlist(lapply(APpercent, function(x) c(length(which(x == 1))))))
+appear <- data.frame(unlist(lapply(APpercent, function(x) c(length(which(x == 0))))))
+disappear <- data.frame(unlist(lapply(APpercent, function(x) c(length(which(x == Inf))))))
+absent <- data.frame(unlist(lapply(APpercent, function(x) c(length(which(is.nan(x)))))))
+
+# change column names
+colnames(present)[1]  <- "present"
+colnames(absent)[1]  <- "absent"
+colnames(appear)[1]  <- "appear"
+colnames(disappear)[1]  <- "disappear"
+
+# Merge
+OZIN <- cbind(present,absent,appear,disappear)
+
+```
+
+
+```{}
+
+TNN <- 284 # Number of ASVs that pass threshold
+
+# Reorder OZIN by present microbes
+OZIN <- OZIN[order(OZIN$present,decreasing = TRUE ),]
+```
+
+
+
+
+ASVs with highest prevalence across samples 
+
+```{}
+Tomi.name.finder = function(x,n){
+  x.names = order(x, decreasing = TRUE )
+  names <- rownames(x)[x.names[1:n]]
+  return(names) }
+####### 
+present.names <- Tomi.name.finder(OZIN[c(1)], TNN) # Top TNN microbes
+Tomi.microbes <- present.names
+```
+
+CLEAR WORKSPACE
+```{r message=FALSE, warning=FALSE}
+rm(absent,appear,disappear,APpercent,DFGT1,DFGT2,ggdf,data2,Threshold,OZIN,Tomi.name.finder)
+```
+
+
+DELTA CHANGE 
+
+```{}
+## Load Datasets
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/DF")
+#######
+# READ DATA
+#######
+DFGT1 <- read.csv("DF.ASV.T1.MO.csv")
+DFGT2 <- read.csv("DF.ASV.T2.MO.csv")
+
+# Change column to row names
+row.names(DFGT1) <- DFGT1$X
+row.names(DFGT2) <- DFGT2$X
+
+# Remove specific column
+DFGT1 <- DFGT1[ , !names(DFGT1) %in% c("X")]
+DFGT2 <- DFGT2[ , !names(DFGT2) %in% c("X")]
+#####################
+
+#######
+# No Relative Abundance 
+#######
+
+# Select Top TNN microbes
+DFGT1 <- DFGT1[,c(present.names)]   
+DFGT2 <- DFGT2[,c(present.names)]
+```
+
+Calculating Delta Change 
+
+```{}
+Tomi.DC.Function = function(Early, Late, DC){
+  if (DC == 0 ){
+	return(as.data.frame(Late - Early))
+  }else if(DC == 3){
+	pseudo_early <- Early
+	pseudo_late <-  Late
+	return(as.data.frame (abs((pseudo_late - pseudo_early)) / ((pseudo_early + pseudo_late)/2)))
+  }else{
+	print("Provide valid DC")
+  } }
+Delta_change.third <-  Tomi.DC.Function(DFGT1, DFGT2, 3)
+```
+
+```{}
+#Order Delta change by median for each group
+Median_no_penalty <- as.data.frame(lapply(Delta_change.third[present.names], median, na.rm = TRUE))
+Median_no_penalty <- as.data.frame(t(Median_no_penalty))
+colnames(Median_no_penalty) <- 'Deltachange'
+
+```
+
+```{}
+rm(Delta_change.third,DFGT1,DFGT2,Tomi.DC.Function,present.names,TNN)
+```
+
+
+```{}
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/DF")
+Taxonomy <- read_csv('Taxonomy.csv')
+#
+Median_no_penalty$ASV <- row.names(Median_no_penalty)
+#
+Stable.ASV <- merge(Median_no_penalty, Taxonomy , by = 'ASV', all= FALSE)
+```
+
+
+```{}
+Stable.ASV<- Stable.ASV[order(Stable.ASV$Deltachange ,decreasing = FALSE ),]
+table <- subset(Stable.ASV, select = c('ASV','Deltachange','Genus','Species'))
+#write.csv(table,"DeltachangeASV.csv", row.names = FALSE)
+grid.table(table[1:50,])
+```
+
+```{}
+rm(Median_no_penalty,Taxonomy)
+```
+
+
+
+
+Observed / Expected  Difference
+Load data
+```{}
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/DF")
+#####################
+# READ DATA
+#####################
+
+DFGT1 <- read.csv("DF.ASV.T1.MO.csv")
+DFGT2 <- read.csv("DF.ASV.T2.MO.csv")
+
+# Change column to row names
+row.names(DFGT1) <- DFGT1$X
+row.names(DFGT2) <- DFGT2$X
+
+# Remove specific column
+DFGT1 <- DFGT1[ , !names(DFGT1) %in% c("X")]
+DFGT2 <- DFGT2[ , !names(DFGT2) %in% c("X")]
+
+#####################
+# Relative Abundance not needed
+####################
+
+# Select Top TNN microbes
+DFGT1 <- DFGT1[,c(Tomi.microbes)]   
+DFGT2 <- DFGT2[,c(Tomi.microbes)]
+```
+
+
+```{} 
+Threshold <-  1
+####
+DFGT1[DFGT1 < Threshold ] <- 0	# Absence
+DFGT1[DFGT1 >= Threshold ] <- 1	# Presence
+####
+DFGT2[DFGT2 < Threshold ] <- 0	# Absence
+DFGT2[DFGT2 >= Threshold] <- 1	# Presence
+####
+# A/P Percentage for each genus
+APpercent <- DFGT1 / DFGT2
+# Count prevalence
+observed <- data.frame(unlist(lapply(APpercent, function(x) c(length(which(x == 1))))))
+# change column names
+colnames(observed)[1]  <- "observed"
+####
+T1 <- as.data.frame(colSums(DFGT1))
+colnames(T1) <- 'T1'
+####
+T2 <- as.data.frame(colSums(DFGT2))
+colnames(T2) <- 'T2'
+####
+Expected <- ( T1 * T2 ) / 1049
+colnames(Expected) <- 'Expected'
+####
+Diff <- abs(observed - Expected)
+colnames(Diff ) <- 'Diff '
+####
+tax_feat <- cbind(observed,T1,T2,Expected,Diff)
+####
+tax_feat$OE_Difference <- as.numeric(tax_feat$Diff)
+####
+tax_feat$ASV <- row.names(tax_feat)
+
+```
+
+
+
+```{} 
+rm(Genus,Threshold,T1,T2,observed,Expected,Diff,d,DFGT1,DFGT2,APpercent)
+```
+Visualize
+```{} 
+Ranked.ASV.table <- merge(table,tax_feat, by = 'ASV', all= FALSE)
+```
+
+```{} 
+ggscatter(Ranked.ASV.table, x = "Deltachange", y = "OE_Difference",
+      	add = "reg.line", conf.int = TRUE,
+      	cor.coef = TRUE, cor.method = "spearman",
+      	xlab = "Delta-change", ylab = "OE_Difference", title = "")
+
+```
+
+```{}
+p <- ggplot(Ranked.ASV.table, aes(x= Deltachange, y= T1, color = OE_Difference))+
+  scale_color_viridis_c() +
+  labs(x="prevalence at both time points", y="Prevalence at time point 1") +
+  geom_point(size=3)
+ggplotly(p)
+```
+
+```{}
+ggplot(Ranked.ASV.table) +
+  geom_point(aes(observed,OE_Difference), color = 'black') +
+  geom_text_repel(aes(observed, OE_Difference, label = Genus)) +
+  theme_classic(base_size = 10)
+
+```
+
+```{}
+p <- ggplot(Ranked.ASV.table, aes(x=Deltachange, y= OE_Difference , color= Genus)) +
+  geom_point() + scale_y_log10() + scale_x_log10()
+ggplotly(p)
+
+```
+
+```{}
+rm(table,tax_feat,Tomi.microbes)
+```
+
+
+
+
+
+Consolidate 16srRNA sequences from both datasets
+```{}
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/")
+Taxonomy <- read_csv('DF/Taxonomy.csv')
+DF.Taxonomy  <- read.xlsx('HELIUS_ASV_taxonomy_and_sequences.xlsx')   # rename
+
+```
+
+```{}
+consolidated.amplicon <- filter(Taxonomy, ASV %in% Tomi.microbes)
+consolidated.amplicon <- consolidated.amplicon$amplicon.seqs
+#
+consolidated.amplicon <- filter(DF.Taxonomy, ASV_sequence %in% consolidated.amplicon)
+rm(DF.Taxonomy,Taxonomy,Tomi.microbes)
+```
+
+
+
+Prepare ASV for larger data
+```{}
+setwd('/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/')
+df <- readRDS("HELIUS_N4117_16S_H1.RDS")
+
+# Create a function
+extract.transpose <- function(DF.ASV) {
+  # Extract abundance matrix from the phyloseq object
+  OTU1 = as(otu_table(DF.ASV), "matrix")
+  # transpose if necessary
+  if(taxa_are_rows(DF.ASV)){OTU1 <- t(OTU1)}
+  # Coerce to data.frame
+  OTUdf = as.data.frame(OTU1)
+  return(OTUdf)
+}
+DF.ASV.T <- extract.transpose(df)
+
+
+
+consolidate  <- c(consolidated.amplicon$ASV)
+#
+DF.ASV.T <- subset(DF.ASV.T, select = consolidate)
+
+DF.ASV.T$X <- row.names(DF.ASV.T)
+DF.ASV.T  <- DF.ASV.T[order(DF.ASV.T$X),]
+setwd('/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/DF')
+write.csv(DF.ASV.T,"DF.ASV.T.csv", row.names = FALSE)
+write.csv(consolidated.amplicon,"consolidate.amplicon.csv", row.names = FALSE)
+```
+
+Load ASV data set 
+```{}
+#######
+setwd('/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/DF')
+DF.ASV.T <- read.csv("DF.ASV.T.csv")
+ID <- DF.ASV.T$X
+row.names(DF.ASV.T) <- DF.ASV.T$X
+DF.ASV.T <- DF.ASV.T[ , !names(DF.ASV.T) %in% c("X")]
+rm(ID)
+
+####
+####
+DF.ASV.T$IDs <- row.names(DF.ASV.T)
+DF.ASV.T= DF.ASV.T %>%  filter(IDs %in% c(indi.list$ID1))
+row.names(DF.ASV.T) <- DF.ASV.T$IDs
+####
+
+```
+
+
+Visualize zero skewed distribution of abundance
+```{}
+percentage_of_zeros_DFGT <- as.data.frame(colSums(DF.ASV.T == 0)/nrow(DF.ASV.T)*100)
+colnames(percentage_of_zeros_DFGT) <- 'Zero_percent'
+
+N <- rownames(percentage_of_zeros_DFGT)
+percentage_of_zeros_DFGT <- cbind(N,percentage_of_zeros_DFGT)
+
+percentage_of_zeros_DFGT$N<- factor(percentage_of_zeros_DFGT$N,levels = percentage_of_zeros_DFGT$N[order(percentage_of_zeros_DFGT$Zero_percent)])
+#ggplot(percentage_of_zeros_DFGT , aes(N, Zero_percent)) + geom_bar(stat = "identity", width=0.3) + coord_flip() + ggtitle('Zero abundance') + xlab('Genus') +ylab('percentage of zeros')
+
+```
+
+
+Separate microbes to quantitative / binary traits to combat zero skewed distribution of abundance
+Zero abundance border of 5%
+
+```{}
+quantitative.merged.microbes <- subset(percentage_of_zeros_DFGT , Zero_percent <= 5 )
+quantitative.merged.microbes <- as.character(quantitative.merged.microbes$N)
+
+binary.merged.microbes <- subset(percentage_of_zeros_DFGT , Zero_percent > 5 )
+binary.merged.microbes <- as.character(binary.merged.microbes$N)
+#
+rm(percentage_of_zeros_DFGT,N,binary.merged.microbes)
+
+```
+
+
+
+Prepare phenotype files for GWAS
+```{} 
+setwd('/home/tomi/Desktop/Arena/ASV_RMD/GWAS/')
+Eigenvectors <- read.table('/home/tomi/Desktop/Arena/ASV_RMD/GWAS/plink2.eigenvec')
+Metadata <- read.csv('/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/HELIUS_N4117_metadat.csv', sep = ';')
+colnames(Eigenvectors) = c("ID1","ID2","PC1","PC2","PC3","PC4","PC5", "PC6","PC7","PC8","PC9","PC10")
+colnames(Metadata) = c("ID1","Ethnicity","Age","Sex","BMI")
+
+# Inner join
+PCA.DF <- merge(Metadata, Eigenvectors, by = 'ID1', all= FALSE)
+# Relocate ID
+PCA.DF <- PCA.DF %>% relocate(ID2, .before = Ethnicity)
+
+
+covariates <- subset(PCA.DF, select = c('ID1','ID2',"PC1","PC2","PC3","PC4","PC5",'PC6',"PC7",'Age',"BMI"))
+colnames(covariates) = c('#FID','IID',"PC1","PC2","PC3","PC4","PC5",'PC6',"PC7", 'Age',"BMI")
+# Scale Age and BMI
+# Standard deviation
+covariates <- covariates %>% mutate_at(c('Age',"BMI"), ~(scale(.) %>% as.vector))
+rm(Eigenvectors,Metadata,PCA.DF)
+#write.table(covariates,  file = "covariates", sep = "\t", dec = ".", row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+```
+
+
+
+Reading big data into QMM phenotype files for big GWAS
+```{} 
+setwd('/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/')
+####
+####
+QMM <- DF.ASV.T[,c(quantitative.merged.microbes)] 
+
+QMM <- log10((QMM + 1 ))
+
+# Indexing
+QMM$X <- row.names(QMM)
+QMM$XX <- row.names(QMM)
+####
+####
+Phenotype_extension <- subset(covariates, select = c("#FID","PC1","PC2","PC3","PC4","PC5","PC6","PC7","Age","BMI"))
+
+
+
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/GWAS/")
+###
+###
+for (i in quantitative.merged.microbes){
+  phenotype  <- QMM[,c('X','XX', i)]
+  phenotype$X <- strtoi(phenotype$X)
+  phenotype$XX <- strtoi(phenotype$XX)
+  colnames(phenotype) = c('#FID','IID','phenotype')
+  phenotype <- merge(phenotype, Phenotype_extension , by = '#FID', all= FALSE)
+  write.table(phenotype,  file = paste(i,'.phe', sep =''), sep = "\t", dec = ".", row.names = FALSE, col.names = TRUE ,quote = FALSE)
+}
+
+```
+
+
+Reading big data into BMM phenotype files for big GWAS
+```{} 
+
+setwd('/home/tomi/Desktop/Arena/ASV_RMD/HeliusBoth/')
+####
+####
+BMM <- DF.ASV.T[,c(binary.merged.microbes)] 
+
+Threshold <- 1
+BMM[BMM >= Threshold ] <- 2	# Presence
+BMM[BMM < Threshold ] <- 1	# Absence
+
+
+# Indexing
+BMM$X <- row.names(BMM)
+BMM$XX <- row.names(BMM)
+
+
+Phenotype_extension <- subset(covariates, select = c("#FID","PC1","PC2","PC3","PC4","PC5","PC6","PC7","Age","BMI"))
+
+
+
+setwd("/home/tomi/Desktop/Arena/ASV_RMD/GWAS_BINARY/")
+###
+###
+for (i in binary.merged.microbes){
+  phenotype  <- BMM[,c('X','XX', i)]
+  phenotype$X <- strtoi(phenotype$X)
+  phenotype$XX <- strtoi(phenotype$XX)
+  colnames(phenotype) = c('#FID','IID','phenotype')
+  phenotype <- merge(phenotype, Phenotype_extension , by = '#FID', all= FALSE)
+  write.table(phenotype,  file = paste(i,'.phe', sep =''), sep = "\t", dec = ".", row.names = FALSE, col.names = TRUE ,quote = FALSE)
+}
+
+
+
+```
+
+
+Dataframe of Significant SNP's for all microbes
+```{} 
+setwd('/home/tomi/Desktop/Arena/ASV_RMD/GWAS/Results/adjusted/')
+path <- "/home/tomi/Desktop/Arena/ASV_RMD/GWAS/Results/adjusted/"
+Result_files <- list.files(path)
+
+GWAS_Results = data.frame()
+
+for (Microbe in Result_files){
+    CSP   <- read.table(Microbe)
+    colnames(CSP) = c("CHROM",	"ID",	"A1",	"UNADJ",	"GC",	"BONF",	"HOLM",	"SIDAK_SS",	"SIDAK_SD",	"FDR_BH",	"FDR_BY")
+    CSP <- subset(CSP, select = c("CHROM","ID",	"BONF" ,"UNADJ"))
+    CSP <- subset(CSP, BONF < 0.05)  
+    if (dim(CSP)[1] != 0){
+        Microbe <- sub('.phe.*',"",Microbe)
+        CSP$Microbe <- Microbe
+        GWAS_Results <- bind_rows(GWAS_Results,CSP)}
+}
+
+print('Significant SNPs')
+print('')
+print(GWAS_Results)
+```
+
+Visualize
+```{}
+setwd('/home/tomi/Desktop/Arena/ASV_RMD/GWAS/Results/adjusted/')
+path <- "/home/tomi/Desktop/Arena/ASV_RMD/GWAS/Results/adjusted/"
+Result_files <- list.files(path)
+
+GWAS_Results = data.frame()
+
+for (Microbe in Result_files){
+    CSP   <- read.table(Microbe)
+    colnames(CSP) = c("CHROM",	"ID",	"A1",	"UNADJ",	"GC",	"BONF",	"HOLM",	"SIDAK_SS",	"SIDAK_SD",	"FDR_BH",	"FDR_BY")
+    CSP <- subset(CSP, select = c("CHROM","ID",	"BONF" ,"UNADJ"))
+    CSP <- subset(CSP, UNADJ < 1e-06)  
+    if (dim(CSP)[1] != 0){
+        Microbe <- sub('.phe.*',"",Microbe)
+        CSP$Microbe <- Microbe
+        GWAS_Results <- bind_rows(GWAS_Results,CSP)}
+}
+
+
+L   <- read.table('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS_BINARY/qc_10_12_19_hwe00001.bim')
+L <- subset(L, select = c('V2','V4'))
+colnames(L) <-c('ID', 'location') 
+
+
+snps.of.interest <- c(GWAS_Results$Microbe)
+rm(CSP,Microbe,path,Result_files)
+```
+
+```{}
+grid.table(GWAS_Results)
+```
+
+
+
+
+Extraction
+ASV QMM Extraction
+```{}
+setwd('/home/tomi/Desktop/Arena/ASV_RMD/GWAS/Results/adjusted/')
+path <- "/home/tomi/Desktop/Arena/ASV_RMD/GWAS/Results/adjusted/"
+Result_files <- list.files(path)
+
+ASV_QMM = data.frame()
+
+for (Microbe in Result_files){
+    CSP   <- read.table(Microbe)
+    colnames(CSP) = c("CHROM",	"ID",	"A1",	"UNADJ",	"GC",	"BONF",	"HOLM",	"SIDAK_SS",	"SIDAK_SD",	"FDR_BH",	"FDR_BY")
+    CSP <- subset(CSP, select = c("CHROM","ID",	"BONF" ,"UNADJ"))
+    CSP <- subset(CSP, UNADJ < 9e-07)  
+    if (dim(CSP)[1] != 0){
+        Microbe <- sub('.phe.*',"",Microbe)
+        CSP$Microbe <- Microbe
+        ASV_QMM  <- bind_rows(ASV_QMM,CSP)}
+}
+
+
+L   <- read.table('/home/tomi/Desktop/Arena/ASV_RMD/GWAS/qc_10_12_19_hwe00001.bim')
+L <- subset(L, select = c('V2','V4'))
+colnames(L) <-c('ID', 'location') 
+
+
+
+rm(CSP,Microbe,path,Result_files,L)
+#write.csv(ASV_QMM,"ASV_QMM.csv", row.names = FALSE)
+```
+
+
+
+GENUS QMM Extraction
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/adjusted/')
+path <- "/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/Results/adjusted/"
+Result_files <- list.files(path)
+
+GENUS_QMM = data.frame()
+
+for (Microbe in Result_files){
+    CSP   <- read.table(Microbe)
+    colnames(CSP) = c("CHROM",	"ID",	"A1",	"UNADJ",	"GC",	"BONF",	"HOLM",	"SIDAK_SS",	"SIDAK_SD",	"FDR_BH",	"FDR_BY")
+    CSP <- subset(CSP, select = c("CHROM","ID",	"BONF" ,"UNADJ"))
+    CSP <- subset(CSP, UNADJ < 9e-07)  
+    if (dim(CSP)[1] != 0){
+        Microbe <- sub('.phe.*',"",Microbe)
+        CSP$Microbe <- Microbe
+        GENUS_QMM <- bind_rows(GENUS_QMM,CSP)}
+}
+
+
+L   <- read.table('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS/qc_10_12_19_hwe00001.bim')
+L <- subset(L, select = c('V2','V4'))
+colnames(L) <-c('ID', 'location') 
+
+
+rm(CSP,Microbe,path,Result_files,L)
+write.csv(GENUS_QMM ,"GENUS_QMM.csv", row.names = FALSE)
+```
+
+ 
+ 
+ 
+GENUS BMM Extraction
+```{}
+setwd('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS_BINARY/Results/adjusted/')
+path <- "/home/tomi/Desktop/Arena/GENUS_RMD/GWAS_BINARY/Results/adjusted/"
+Result_files <- list.files(path)
+
+GENUS_BMM = data.frame()
+
+for (Microbe in Result_files){
+    CSP   <- read.table(Microbe)
+    colnames(CSP) = c("CHROM",	"ID",	"A1",	"UNADJ",	"GC",	"BONF",	"HOLM",	"SIDAK_SS",	"SIDAK_SD",	"FDR_BH",	"FDR_BY")
+    CSP <- subset(CSP, select = c("CHROM","ID",	"BONF" ,"UNADJ"))
+    CSP <- subset(CSP, UNADJ < 9e-07)  
+    if (dim(CSP)[1] != 0){
+        Microbe <- sub('.phe.*',"",Microbe)
+        CSP$Microbe <- Microbe
+        GENUS_BMM <- bind_rows(GENUS_BMM,CSP)}
+}
+
+
+L   <- read.table('/home/tomi/Desktop/Arena/GENUS_RMD/GWAS_BINARY/qc_10_12_19_hwe00001.bim')
+L <- subset(L, select = c('V2','V4'))
+colnames(L) <-c('ID', 'location') 
+
+
+rm(CSP,Microbe,path,Result_files,L)
+write.csv(GENUS_BMM ,"GENUS_BMM.csv", row.names = FALSE)
+```
+ 
+ 
+
+
+# MR Function
+
+Arguments Mendilian randomization
+ 
+Exposure :
+   Bifidobacterium GENUS_QMM
+   Dorea GENUS_QMM
+   Roseburia GENUS_QMM
+   Zotu72 ASV_QMM
+   
+Outcome :
+  coloncancer_2
+  liver disease
+  
+
+P_threshold :
+   1e-05
+   
+   
+   
+# 
+
+```{}
+
+setwd('/home/tomi/Desktop/Arena/MR_RMD')
+
+gunzip("cancer1-20001-1020.tsv.bgz", "cancer1-20001-1020.tsv")
+gunzip("cancer2-153.tsv.bgz", "cancer2-153.tsv")
+gunzip("cancer3-153.2.tsv.bgz", "cancer3-153.2.tsv")
+
+gunzip("cirrhosis1-20002-1158.tsv.bgz", "cirrhosis1-20002-1158.tsv")
+gunzip("cirrhosis2-K74.tsv.bgz", "cirrhosis2-K74.tsv")
+gunzip("cirrhosis3-571.tsv.bgz", "cirrhosis3-571.tsv")
+   
+``` 
+   
+   
+MR Function
+
+
+```{} 
+setwd('/home/tomi/Desktop/Arena/MR_RMD')
+
+Tomi.MR = function(exposure,outcome,P_threshold, metanalysis){
+    ####
+    # Exposure
+    exposure <- read.table(exposure, header =  TRUE)  # Remember to remove comment in file
+    # Remove covariate results
+    exposure <- subset(exposure, TEST %in% c("ADD"))
+    
+    # Filter data frame by significant P values
+    exposure <- filter(exposure, P < P_threshold)
+    
+    colnames(exposure)[which(names(exposure) == "ID")] <- 'SNP'
+    colnames(exposure)[which(names(exposure) == "CHROM")] <- 'chr_name'
+    colnames(exposure)[which(names(exposure) == "POS")] <- 'chr_start'
+    colnames(exposure)[which(names(exposure) == "ALT")] <- 'effect_allele.exposure'
+    colnames(exposure)[which(names(exposure) == "REF")] <- 'other_allele.exposure'
+    colnames(exposure)[which(names(exposure) == "BETA")] <- 'beta.exposure'
+    colnames(exposure)[which(names(exposure) == "SE")] <- 'se.exposure'
+    
+    
+    
+    # clump filtered SNP's
+    exposure <- clump_data(exposure)
+    
+    # save chrom and position of significant snps
+    chrom_pos <- subset(exposure, select = c("chr_name","chr_start","SNP"))
+    
+    # F statistics
+    F_stat <- subset(exposure, select = c('SNP','beta.exposure','se.exposure'))
+    F_stat$beta.exposure <- F_stat$beta.exposure^2
+    F_stat$se.exposure <- F_stat$se.exposure^2
+    F_stat$F <- F_stat$beta.exposure / F_stat$se.exposure 
+
+    
+    # Select columns of exposure
+    exposure <- subset(exposure, select = c('SNP','effect_allele.exposure','beta.exposure', 'se.exposure','other_allele.exposure'))
+    # Add Tags
+    exposure$id.exposure <- 'M'
+    exposure$exposure <- 'MICROBE'
+    exposure$eaf.exposure <- NaN
+    exposure$pval.exposure <-NaN
+    ####
+    
+    ####
+    outcome <- read_tsv(outcome)
+    
+    colnames(outcome)[which(names(outcome) == "chr")] <- 'chr_name'
+    colnames(outcome)[which(names(outcome) == "pos")] <- 'chr_start'
+    colnames(outcome)[which(names(outcome) == "alt")] <- 'effect_allele.outcome'
+    colnames(outcome)[which(names(outcome) == "ref")] <- 'other_allele.outcome'
+    
+    if ( metanalysis == TRUE){
+      
+    colnames(outcome)[which(names(outcome) == "beta_meta")] <- 'beta.outcome'
+    colnames(outcome)[which(names(outcome) == "se_meta")] <- 'se.outcome'
+    } else{
+      
+    colnames(outcome)[which(names(outcome) == "beta_EUR")] <- 'beta.outcome'
+    colnames(outcome)[which(names(outcome) == "se_EUR")] <- 'se.outcome'
+    }
+    
+    # Create a filter ID
+    outcome$filterid <- paste(outcome$chr_name,outcome$chr_start,sep = '_')
+    chrom_pos$filterid <- paste(chrom_pos$chr_name,chrom_pos$chr_start,sep = '_')
+    
+    
+    # Filter outcome
+    outcome <- filter(outcome, outcome$filterid %in% c(chrom_pos$filterid))
+    
+    # ADD RS ID BY MERGING
+    outcome <-  merge(outcome,chrom_pos,by='filterid',all = FALSE)
+    
+    
+    outcome <- subset(outcome, select = c('SNP','effect_allele.outcome','beta.outcome','se.outcome','other_allele.outcome'))
+    
+    outcome$id.outcome <- 'C'
+    outcome$outcome <- 'Disease'
+    outcome$eaf.outcome <- NaN
+    outcome$pval.outcome <-NaN
+    
+    rm(afreq,chrom_pos)
+    
+    dat <- harmonise_data(exposure, outcome, action = 2)
+    
+    
+    if (dim(dat)[1] > 1){
+      dat <- subset(dat, select = -c(eaf.outcome,eaf.exposure))
+  
+      # Perform MR
+      res <- mr(dat, method_list = c('mr_ivw', 'mr_simple_mode', 'mr_weighted_median'  ,'mr_weighted_mode'))
+  
+      # Sensitivity test
+      Heterogeneity <- mr_heterogeneity(dat,method_list = c('mr_egger_regression'))
+      Horizontal_pleiotropy <- mr_pleiotropy_test(dat)
+      
+      results <- list(res, F_stat , Heterogeneity,  Horizontal_pleiotropy, dat)
+      
+    } else {
+     results <- data.frame()
+    }
+      
+
+   
+    ####
+  
+  return(results) }
+
+
+
+```
+
+
+
+   
+```{} 
+setwd('/home/tomi/Desktop/Arena/MR_RMD')
+
+
+Bifidobacterium.cancer2.153 <- Tomi.MR('Bifidobacterium.phe.phenotype.glm.linear', 'cancer2-153.tsv', 1e-05 , TRUE)
+Bifidobacterium.cirrhosis3.571 <- Tomi.MR('Bifidobacterium.phe.phenotype.glm.linear', 'cirrhosis3-571.tsv', 1e-05 , TRUE)
+
+
+Dorea.cancer2.153 <- Tomi.MR('Dorea.phe.phenotype.glm.linear', 'cancer2-153.tsv', 1e-05 , TRUE)
+Dorea.cirrhosis3.571 <- Tomi.MR('Dorea.phe.phenotype.glm.linear', 'cirrhosis3-571.tsv', 1e-05 , TRUE)
+
+
+Zotu72.cancer2.153 <- Tomi.MR('Zotu72.phe.phenotype.glm.linear', 'cancer2-153.tsv', 1e-05 , TRUE)
+Zotu72.cirrhosis3.571 <- Tomi.MR('Zotu72.phe.phenotype.glm.linear', 'cirrhosis3-571.tsv', 1e-05 , TRUE)
+
+
+
+```
+
+
+```{} 
+setwd('/home/tomi/Desktop')
+write.xlsx(Bifidobacterium.cancer2.153, "Bifidobacterium.cancer2.153.xlsx")
+write.xlsx(Bifidobacterium.cirrhosis3.571, "Bifidobacterium.cirrhosis3.571.xlsx")
+
+write.xlsx(Dorea.cancer2.153 , "Dorea.cancer2.153.xlsx")
+write.xlsx(Dorea.cirrhosis3.571, "Dorea.cirrhosis3.571.xlsx")
+
+
+write.xlsx(Zotu72.cancer2.153 , "Zotu72.cancer2.153.xlsx")
+write.xlsx(Zotu72.cirrhosis3.571 , "Zotu72.cirrhosis3.571.xlsx")
+
+
+
+```
+
+
+
+Scatter plot
+
+```{}
+mr_scatter_plot(Bifidobacterium.cancer2.153[[1]], Bifidobacterium.cancer2.153[[5]])
+mr_scatter_plot(Bifidobacterium.cirrhosis3.571[[1]], Bifidobacterium.cirrhosis3.571[[5]])
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
