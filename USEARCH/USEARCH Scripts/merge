@@ -1,8 +1,0 @@
-#!/bin/bash
-
-echo 'Welcome!  Amsterdam Wolf....'
-echo '	'
-echo 'Mergin  paired reads'
-
-cd /home/tomi/Desktop/Arena/USEARCH/fastqfiles/
-usearch32 -fastq_mergepairs *_R1*.fastq -relabel @ -fastq_maxdiffs 30 -fastq_pctid 80  -fastqout ../Out/merged.fastq 2>&1
